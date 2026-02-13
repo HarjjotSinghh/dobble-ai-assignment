@@ -7,28 +7,28 @@ A smart doctor appointment and reporting assistant that uses **MCP (Model Contex
 ## Architecture Overview
 
 ```
-┌─────────────────┐     HTTP/WS      ┌──────────────────┐
-│  React Frontend │ ◄──────────────► │   FastAPI Server  │
+┌─────────────────┐     HTTP/WS      ┌────────────────────┐
+│  React Frontend │ ◄──────────────► │   FastAPI Server   │
 │  (Patient/Doctor│                  │                    │
-│   Dashboards)   │                  │  ┌──────────────┐ │
-└─────────────────┘                  │  │  LLM Agent   │ │
-                                     │  │ (Orchestrator)│ │
-                                     │  └──────┬───────┘ │
-                                     │         │         │
-                                     │  ┌──────▼───────┐ │
-                                     │  │  MCP Server   │ │
-                                     │  │ (Tools/       │ │
-                                     │  │  Resources/   │ │
-                                     │  │  Prompts)     │ │
-                                     │  └──────┬───────┘ │
-                                     │         │         │
-                                     └─────────┼─────────┘
-                                               │
-                    ┌──────────────┬────────────┼───────────┬──────────────┐
-                    │              │            │           │              │
+│   Dashboards)   │                  │  ┌──────────────┐  │
+└─────────────────┘                  │  │  LLM Agent   │  │
+                                     │  │(Orchestrator)│  │
+                                     │  └──────┬───────┘  │
+                                     │         │          │
+                                     │  ┌──────▼──────┐   │
+                                     │  │  MCP Server │   │
+                                     │  │ (Tools/     │   │
+                                     │  │  Resources/ │   │
+                                     │  │  Prompts)   │   │
+                                     │  └─────────────┘   │
+                                     │        │           │
+                                     └────────┼───────────┘
+                                              │
+                    ┌─────────────┬───────────┼──────────┬─────────────┐
+                    │             │           │          │             │
               ┌─────▼─────┐ ┌─────▼─────┐ ┌───▼───┐ ┌────▼─────┐ ┌─────▼────┐
-              │ PostgreSQL │ │  Google   │ │ Email │ │  Slack   │ │  In-App  │
-              │  Database  │ │ Calendar  │ │ SMTP  │ │ Webhook  │ │ Notifs   │
+              │ PostgreSQL│ │  Google   │ │ Email │ │  Slack   │ │  In-App  │
+              │ Database  │ │  Calendar │ │ SMTP  │ │  Webhook │ │  Notifs  │
               └───────────┘ └───────────┘ └───────┘ └──────────┘ └──────────┘
 ```
 
