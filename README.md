@@ -1,3 +1,5 @@
+<img width="1230" height="937" alt="image" src="https://github.com/user-attachments/assets/ae2db3c7-7c77-4ba9-9556-2b565a9c513f" />
+
 # Doctor Appointment Assistant - MCP-Powered AI Agent
 
 A smart doctor appointment and reporting assistant that uses **MCP (Model Context Protocol)** to expose APIs and tools dynamically discovered and invoked by an AI agent (LLM). The system demonstrates agentic behavior where the AI decides what tools to use, when to use them, and how to combine them to fulfill user prompts.
