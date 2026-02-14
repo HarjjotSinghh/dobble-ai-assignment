@@ -27,7 +27,7 @@ Architecture:
   │  └─────────────────────────────────────────────────┘    │
   │                                                         │
   │  Routers: auth, chat, appointments, notifications       │
-  │  Database: PostgreSQL (async via SQLAlchemy)             │
+  │  Database: PostgreSQL (async via SQLAlchemy)            │
   └─────────────────────────────────────────────────────────┘
 """
 

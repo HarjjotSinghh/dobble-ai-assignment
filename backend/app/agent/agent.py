@@ -14,16 +14,16 @@ Architecture:
   User Prompt
        │
   ┌────▼────────────────────────────────────────────────────────────────┐
-  │  AGENT LOOP (this module)                                          │
-  │                                                                    │
-  │  1. Query MCP Client → discover_tools() → [tools/list protocol]   │
-  │  2. Convert schemas → get_tools_for_llm() → OpenAI/Anthropic fmt  │
-  │  3. Send to LLM with tool definitions + conversation history      │
-  │  4. LLM decides: call tool(s) or return final answer              │
-  │  5. Route tool_call → MCP Client → call_tool() → [tools/call]    │
-  │  6. Feed result back to LLM as tool_result                        │
-  │  7. Repeat from step 4 until LLM gives final text response        │
-  │                                                                    │
+  │  AGENT LOOP (this module)                                           │
+  │                                                                     │
+  │  1. Query MCP Client → discover_tools() → [tools/list protocol]     │
+  │  2. Convert schemas → get_tools_for_llm() → OpenAI/Anthropic fmt    │
+  │  3. Send to LLM with tool definitions + conversation history        │
+  │  4. LLM decides: call tool(s) or return final answer                │
+  │  5. Route tool_call → MCP Client → call_tool() → [tools/call]       │
+  │  6. Feed result back to LLM as tool_result                          │
+  │  7. Repeat from step 4 until LLM gives final text response          │
+  │                                                                     │
   └────┬────────────────────────────────────────────────────────────────┘
        │
   Final Response to User

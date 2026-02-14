@@ -17,37 +17,37 @@ This implementation follows the official MCP specification with clear separation
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  HOST APPLICATION (FastAPI - main.py)                                  │
-│                                                                        │
-│  ┌────────────────┐      ┌──────────────────────────────────────────┐  │
-│  │  React Frontend│ HTTP │  Chat Router (routers/chat.py)           │  │
-│  │  (Patient/     │◄────►│                                          │  │
-│  │   Doctor UI)   │      │  ┌────────────────────────────────────┐  │  │
-│  └────────────────┘      │  │  LLM Agent (agent/agent.py)        │  │  │
+│  HOST APPLICATION (FastAPI - main.py)                                   │
+│                                                                         │
+│  ┌────────────────┐      ┌───────────────────────────────────────────┐  │
+│  │  React Frontend│ HTTP │  Chat Router (routers/chat.py)            │  │
+│  │  (Patient/     │◄────►│                                           │  │
+│  │   Doctor UI)   │      │  ┌─────────────────────────────────────┐  │  │
+│  └────────────────┘      │  │  LLM Agent (agent/agent.py)         │  │  │
 │                          │  │  - Orchestrates multi-step workflows│  │  │
 │                          │  │  - Discovers tools dynamically      │  │  │
 │                          │  │  - Routes calls through MCP client  │  │  │
-│                          │  └───────────┬────────────────────────┘  │  │
-│                          └──────────────┼───────────────────────────┘  │
-│                                         │                              │
-│                          ┌──────────────▼───────────────────────────┐  │
-│                          │  MCP CLIENT (mcp_client/client.py)       │  │
-│                          │  - connect()         [initialize]        │  │
-│                          │  - discover_tools()   [tools/list]       │  │
-│                          │  - call_tool()        [tools/call]       │  │
-│                          │  - list_resources()   [resources/list]   │  │
-│                          │  - list_prompts()     [prompts/list]     │  │
-│                          │  - get_tools_for_llm() [schema convert]  │  │
-│                          └──────────────┬───────────────────────────┘  │
-└─────────────────────────────────────────┼─────────────────────────────┘
+│                          │  └───────────┬─────────────────────────┘  │  │
+│                          └──────────────┼────────────────────────────┘  │
+│                                         │                               │
+│                          ┌──────────────▼───────────────────────────┐   │
+│                          │  MCP CLIENT (mcp_client/client.py)       │   │
+│                          │  - connect()         [initialize]        │   │
+│                          │  - discover_tools()   [tools/list]       │   │
+│                          │  - call_tool()        [tools/call]       │   │
+│                          │  - list_resources()   [resources/list]   │   │
+│                          │  - list_prompts()     [prompts/list]     │   │
+│                          │  - get_tools_for_llm() [schema convert]  │   │
+│                          └──────────────┬───────────────────────────┘   │
+└─────────────────────────────────────────┼───────────────────────────────┘
                                           │ stdio transport
                                           │ (JSON-RPC 2.0)
 ┌─────────────────────────────────────────▼─────────────────────────────┐
 │  MCP SERVER (subprocess - mcp_server/server.py)                       │
 │  Built with FastMCP (Python MCP SDK)                                  │
-│                                                                        │
+│                                                                       │
 │  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │  TOOLS (10) - Registered via @mcp.tool() decorator             │  │
+│  │  TOOLS (10) - Registered via @mcp.tool() decorator              │  │
 │  │  list_doctors, check_doctor_availability, book_appointment,     │  │
 │  │  cancel_appointment, get_appointment_stats,                     │  │
 │  │  get_patient_appointments, send_email_notification,             │  │
@@ -60,11 +60,11 @@ This implementation follows the official MCP specification with clear separation
 │  │  PROMPTS (2) - @mcp.prompt()                                    │  │
 │  │  book_appointment_prompt, doctor_daily_summary_prompt           │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
-│                                                                        │
-│  ┌──────────┐  ┌──────────┐  ┌────────┐  ┌───────┐  ┌──────────┐    │
-│  │PostgreSQL│  │ Google   │  │ Email  │  │ Slack │  │ In-App   │    │
-│  │ Database │  │ Calendar │  │ SMTP   │  │Webhook│  │WebSocket │    │
-│  └──────────┘  └──────────┘  └────────┘  └───────┘  └──────────┘    │
+│                                                                       │
+│  ┌──────────┐  ┌──────────┐  ┌────────┐  ┌───────┐  ┌──────────┐      │
+│  │PostgreSQL│  │ Google   │  │ Email  │  │ Slack │  │ In-App   │      │
+│  │ Database │  │ Calendar │  │ SMTP   │  │Webhook│  │WebSocket │      │
+│  └──────────┘  └──────────┘  └────────┘  └───────┘  └──────────┘      │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 

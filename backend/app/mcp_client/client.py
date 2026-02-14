@@ -7,13 +7,13 @@ discovers available tools/resources/prompts dynamically at runtime through
 the MCP protocol (JSON-RPC 2.0), and routes tool calls from the LLM agent.
 
 Architecture:
-  ┌─────────────────────────────────────────────────────────────────┐
+  ┌────────────────────────────────────────────────────────────────┐
   │  HOST (FastAPI Application)                                    │
   │                                                                │
   │  ┌──────────────┐     ┌──────────────────────────────────────┐ │
   │  │  LLM Agent   │────>│  MCP Client (this module)            │ │
   │  │  (agent.py)  │     │  - discover_tools()   [tools/list]   │ │
-  │  │              │<────│  - call_tool()         [tools/call]   │ │
+  │  │              │<────│  - call_tool()         [tools/call]  │ │
   │  │  Decides     │     │  - list_resources()                  │ │
   │  │  which tool  │     │  - list_prompts()                    │ │
   │  │  to call     │     │  - get_tools_for_llm() [schema conv] │ │
