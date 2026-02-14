@@ -2,7 +2,7 @@
 
 # Doctor Appointment Assistant - MCP-Powered AI Agent
 
-A smart doctor appointment and reporting assistant that uses **MCP (Model Context Protocol)** to expose APIs and tools dynamically discovered and invoked by an AI agent (LLM). The system demonstrates agentic behavior where the AI decides what tools to use, when to use them, and how to combine them to fulfill user prompts.
+A smart doctor appointment and reporting assistant built with **true MCP (Model Context Protocol) architecture**. The system implements the full MCP Host–Client–Server design pattern where the LLM agent discovers tools dynamically from the MCP server via the protocol and routes all tool calls through the MCP client-server channel.
 
 ## Screenshots:
 
@@ -11,46 +11,98 @@ A smart doctor appointment and reporting assistant that uses **MCP (Model Contex
 
 ---
 
-## Architecture Overview
+## MCP Architecture (Host–Client–Server)
+
+This implementation follows the official MCP specification with clear separation between Host, Client, and Server layers:
 
 ```
-┌─────────────────┐     HTTP/WS      ┌────────────────────┐
-│  React Frontend │ ◄──────────────► │   FastAPI Server   │
-│  (Patient/Doctor│                  │                    │
-│   Dashboards)   │                  │  ┌──────────────┐  │
-└─────────────────┘                  │  │  LLM Agent   │  │
-                                     │  │(Orchestrator)│  │
-                                     │  └──────┬───────┘  │
-                                     │         │          │
-                                     │  ┌──────▼──────┐   │
-                                     │  │  MCP Server │   │
-                                     │  │ (Tools/     │   │
-                                     │  │  Resources/ │   │
-                                     │  │  Prompts)   │   │
-                                     │  └─────────────┘   │
-                                     │        │           │
-                                     └────────┼───────────┘
-                                              │
-                    ┌─────────────┬───────────┼──────────┬─────────────┐
-                    │             │           │          │             │
-              ┌─────▼─────┐ ┌─────▼─────┐ ┌───▼───┐ ┌────▼─────┐ ┌─────▼────┐
-              │ PostgreSQL│ │  Google   │ │ Email │ │  Slack   │ │  In-App  │
-              │ Database  │ │  Calendar │ │ SMTP  │ │  Webhook │ │  Notifs  │
-              └───────────┘ └───────────┘ └───────┘ └──────────┘ └──────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│  HOST APPLICATION (FastAPI - main.py)                                  │
+│                                                                        │
+│  ┌────────────────┐      ┌──────────────────────────────────────────┐  │
+│  │  React Frontend│ HTTP │  Chat Router (routers/chat.py)           │  │
+│  │  (Patient/     │◄────►│                                          │  │
+│  │   Doctor UI)   │      │  ┌────────────────────────────────────┐  │  │
+│  └────────────────┘      │  │  LLM Agent (agent/agent.py)        │  │  │
+│                          │  │  - Orchestrates multi-step workflows│  │  │
+│                          │  │  - Discovers tools dynamically      │  │  │
+│                          │  │  - Routes calls through MCP client  │  │  │
+│                          │  └───────────┬────────────────────────┘  │  │
+│                          └──────────────┼───────────────────────────┘  │
+│                                         │                              │
+│                          ┌──────────────▼───────────────────────────┐  │
+│                          │  MCP CLIENT (mcp_client/client.py)       │  │
+│                          │  - connect()         [initialize]        │  │
+│                          │  - discover_tools()   [tools/list]       │  │
+│                          │  - call_tool()        [tools/call]       │  │
+│                          │  - list_resources()   [resources/list]   │  │
+│                          │  - list_prompts()     [prompts/list]     │  │
+│                          │  - get_tools_for_llm() [schema convert]  │  │
+│                          └──────────────┬───────────────────────────┘  │
+└─────────────────────────────────────────┼─────────────────────────────┘
+                                          │ stdio transport
+                                          │ (JSON-RPC 2.0)
+┌─────────────────────────────────────────▼─────────────────────────────┐
+│  MCP SERVER (subprocess - mcp_server/server.py)                       │
+│  Built with FastMCP (Python MCP SDK)                                  │
+│                                                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │  TOOLS (10) - Registered via @mcp.tool() decorator             │  │
+│  │  list_doctors, check_doctor_availability, book_appointment,     │  │
+│  │  cancel_appointment, get_appointment_stats,                     │  │
+│  │  get_patient_appointments, send_email_notification,             │  │
+│  │  send_slack_notification, send_inapp_notification,              │  │
+│  │  find_alternative_slots                                         │  │
+│  ├─────────────────────────────────────────────────────────────────┤  │
+│  │  RESOURCES (1+1) - @mcp.resource()                              │  │
+│  │  doctor://list, doctor://{id}/schedule/{date}                   │  │
+│  ├─────────────────────────────────────────────────────────────────┤  │
+│  │  PROMPTS (2) - @mcp.prompt()                                    │  │
+│  │  book_appointment_prompt, doctor_daily_summary_prompt           │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  ┌──────────┐  ┌──────────┐  ┌────────┐  ┌───────┐  ┌──────────┐    │
+│  │PostgreSQL│  │ Google   │  │ Email  │  │ Slack │  │ In-App   │    │
+│  │ Database │  │ Calendar │  │ SMTP   │  │Webhook│  │WebSocket │    │
+│  └──────────┘  └──────────┘  └────────┘  └───────┘  └──────────┘    │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-### MCP Architecture (Client–Server–Tool/Prompt/Resource)
+### Key MCP Design Principles Implemented
 
-The MCP server (`backend/app/mcp_server/`) exposes:
+1. **Dynamic Tool Discovery**: The agent discovers available tools at runtime by calling `tools/list` on the MCP server via the client. Tool schemas are NOT hardcoded in the agent — they are fetched through the MCP protocol.
 
-| Component | Description |
-|-----------|-------------|
-| **Tools** (10) | Executable actions: `list_doctors`, `check_doctor_availability`, `book_appointment`, `cancel_appointment`, `get_appointment_stats`, `get_patient_appointments`, `send_email_notification`, `send_slack_notification`, `send_inapp_notification`, `find_alternative_slots` |
-| **Resources** (2) | Data endpoints: `doctor://list`, `appointment://today` |
-| **Resource Templates** (1) | Dynamic: `doctor://{doctor_id}/schedule/{date}` |
-| **Prompts** (2) | Templates: `book_appointment`, `doctor_daily_summary` |
+2. **Client–Server–Tool Separation**: Three distinct layers:
+   - **Host** (`main.py`): Manages MCP lifecycle, serves the web application
+   - **Client** (`mcp_client/client.py`): Protocol-level communication with the server
+   - **Server** (`mcp_server/server.py`): Standalone process exposing tools, resources, prompts
 
-The LLM Agent acts as the **MCP Client**, dynamically discovering available tools and deciding which to invoke based on the user's natural language input.
+3. **Protocol-Driven Tool Calls**: All tool execution flows through the MCP protocol:
+   ```
+   Agent → MCP Client [tools/call] → MCP Server → Tool Handler → Database/APIs
+   ```
+   The agent never directly calls tool handlers.
+
+4. **stdio Transport**: The MCP server runs as an independent subprocess. The client communicates via stdin/stdout using JSON-RPC 2.0 messages, following the MCP specification.
+
+5. **Agent-Driven Orchestration**: The LLM agent loop:
+   ```
+   1. Discover tools from MCP server     [tools/list]
+   2. Convert schemas to LLM format      [openai/anthropic]
+   3. Send prompt + tools to LLM
+   4. LLM decides which tool to call
+   5. Route tool call through MCP client  [tools/call]
+   6. Feed result back to LLM
+   7. Repeat until final answer
+   ```
+
+6. **Multi-Tool Chaining**: The agent naturally chains multiple tool calls in a single conversation turn (e.g., `list_doctors → check_availability → book_appointment → send_email`).
+
+7. **Structured Session Management**: Sessions track:
+   - Message history (last 20 messages)
+   - Entity tracking (doctors, dates, appointments mentioned)
+   - Action history (MCP tools called per turn)
+   - Turn counter and timestamps
 
 ---
 
@@ -72,7 +124,7 @@ The LLM Agent acts as the **MCP Client**, dynamically discovering available tool
 ### Bonus Features
 - Role-based login (patient vs doctor) with JWT authentication
 - LLM-powered auto-rescheduling when doctor is unavailable
-- Prompt/chat history tracking
+- Prompt/chat history tracking with structured context
 - Real-time in-app notifications via WebSocket
 
 ---
@@ -84,7 +136,7 @@ The LLM Agent acts as the **MCP Client**, dynamically discovering available tool
 | Frontend | React 18 + Vite + Tailwind CSS |
 | Backend | FastAPI (async) + Python 3.11+ |
 | Database | PostgreSQL 16 + SQLAlchemy (async) |
-| MCP | Python MCP SDK (`mcp` package) |
+| MCP | Python MCP SDK (`mcp` package) with FastMCP |
 | LLM | OpenAI GPT-4o-mini / Anthropic Claude (configurable) |
 | Calendar | Google Calendar API |
 | Email | SMTP (Gmail) / any transactional service |
@@ -163,7 +215,9 @@ uvicorn app.main:app --reload --port 8000
 The server will:
 - Create all database tables automatically
 - Seed demo data (doctors, patients, sample appointments)
-- Print demo login credentials
+- Start the MCP server subprocess
+- Connect the MCP client and discover tools dynamically
+- Print discovered tool count and capabilities
 
 ### 5. Frontend Setup
 
@@ -255,7 +309,7 @@ Agent: Books the 3:00 PM slot (remembers Dr. Ahuja + Friday from context)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/chat/` | Send message to AI agent |
-| GET | `/api/chat/sessions` | Get chat history |
+| GET | `/api/chat/sessions` | Get chat history with context |
 
 ### Appointments
 | Method | Endpoint | Description |
@@ -271,6 +325,12 @@ Agent: Books the 3:00 PM slot (remembers Dr. Ahuja + Friday from context)
 | PUT | `/api/notifications/{id}/read` | Mark as read |
 | PUT | `/api/notifications/read-all` | Mark all read |
 | WS | `/api/notifications/ws/{token}` | Real-time WebSocket |
+
+### Health / MCP Status
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | Health check with MCP server capabilities (dynamically discovered) |
+| GET | `/api/health` | Detailed health check including MCP connection status |
 
 ---
 
@@ -297,7 +357,7 @@ Agent: Books the 3:00 PM slot (remembers Dr. Ahuja + Friday from context)
 dobble-ai-assignment/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI entry point + seed data
+│   │   ├── main.py              # HOST: FastAPI entry + MCP lifecycle management
 │   │   ├── config.py            # Environment configuration
 │   │   ├── database.py          # Async SQLAlchemy setup
 │   │   ├── models/
@@ -306,15 +366,17 @@ dobble-ai-assignment/
 │   │   │   └── schemas.py       # Pydantic request/response schemas
 │   │   ├── routers/
 │   │   │   ├── auth.py          # JWT authentication routes
-│   │   │   ├── chat.py          # AI agent chat endpoint
+│   │   │   ├── chat.py          # AI agent chat endpoint (uses MCP client)
 │   │   │   ├── appointments.py  # Appointment CRUD routes
 │   │   │   └── notifications.py # Notification routes + WebSocket
-│   │   ├── mcp_server/
-│   │   │   ├── server.py        # MCP server (tools, resources, prompts)
-│   │   │   └── tool_handlers.py # Tool execution logic
+│   │   ├── mcp_server/          # MCP SERVER (runs as subprocess)
+│   │   │   ├── server.py        # FastMCP server with @mcp.tool() registration
+│   │   │   └── tool_handlers.py # Tool execution logic (DB + external APIs)
+│   │   ├── mcp_client/          # MCP CLIENT (protocol communication)
+│   │   │   └── client.py        # MCPClient: connect, discover, call_tool
 │   │   ├── agent/
-│   │   │   ├── agent.py         # LLM agent (OpenAI/Anthropic + tool calling)
-│   │   │   └── session.py       # Multi-turn session management
+│   │   │   ├── agent.py         # LLM agent (uses MCPClient for all tool access)
+│   │   │   └── session.py       # Multi-turn session with structured context
 │   │   └── services/
 │   │       ├── calendar_service.py    # Google Calendar integration
 │   │       ├── email_service.py       # SMTP email service
@@ -347,17 +409,19 @@ dobble-ai-assignment/
 
 ## Design Decisions
 
-1. **MCP Integration**: The MCP server defines tools declaratively with JSON schemas, enabling the LLM to discover and invoke them dynamically. Tool handlers are separated from definitions for clean architecture.
+1. **True MCP Client–Server–Tool Separation**: The MCP server runs as a standalone subprocess (via FastMCP) and communicates with the host application through stdio transport using JSON-RPC 2.0. The MCP client discovers tools dynamically via the `tools/list` protocol method — tool definitions are never hardcoded in the agent.
 
-2. **Agentic Loop**: The LLM agent runs in a loop — it can make multiple tool calls per turn (e.g., check availability → book → send email) before returning a final response to the user.
+2. **Protocol-Driven Tool Execution**: All tool calls flow through the MCP protocol: `Agent → MCPClient.call_tool() → [tools/call JSON-RPC] → MCP Server → ToolHandler`. The agent has no direct access to the database or tool handlers.
 
-3. **Multi-Turn Context**: Conversation history is persisted in the `chat_sessions` table with JSON fields, allowing the agent to reference previous messages without the user restating context.
+3. **Agentic Loop with Dynamic Tool Discovery**: The LLM agent runs in a loop where it first discovers available tools from the MCP server, then the LLM decides which tools to call based on user intent. Multiple tools can be chained in a single turn (e.g., check availability → book → notify).
 
-4. **Dual Notification Channels**: Email (SMTP) is used for patient appointment confirmations (Scenario 1), while Slack webhooks + in-app notifications are used for doctor reports (Scenario 2), as required.
+4. **Structured Multi-Turn Sessions**: Sessions persist not just message history but also structured context: entities mentioned (doctors, dates), action history (tools called per turn), and turn counters. This enables the agent to resolve references across conversation turns.
 
-5. **Graceful Degradation**: All external services (Google Calendar, Email, Slack) fall back to demo mode when credentials aren't configured, so the core functionality works without external API setup.
+5. **Dual Notification Channels**: Email (SMTP) is used for patient appointment confirmations (Scenario 1), while Slack webhooks + in-app notifications are used for doctor reports (Scenario 2), as required.
 
-6. **Async Everything**: The entire backend is async (FastAPI + asyncpg + aiosmtplib) for high concurrency and non-blocking I/O.
+6. **Graceful Degradation**: All external services (Google Calendar, Email, Slack) fall back to demo mode when credentials aren't configured, so the core functionality works without external API setup.
+
+7. **Async Everything**: The entire backend is async (FastAPI + asyncpg + aiosmtplib) for high concurrency and non-blocking I/O.
 
 ---
 
@@ -377,10 +441,14 @@ Without credentials, the system runs in **demo mode** (appointments are still sa
 
 | Criteria | Implementation |
 |----------|---------------|
-| MCP Architecture | Full MCP server with 10 tools, 2 resources, 1 resource template, 2 prompts |
+| MCP Architecture | True Host–Client–Server with FastMCP, stdio transport, dynamic tool discovery via protocol |
+| Client–Server–Tool Separation | MCPClient (protocol), MCP Server (subprocess), ToolHandlers (execution) — three distinct layers |
+| Dynamic Tool Discovery | Agent calls `tools/list` at runtime — schemas NOT hardcoded in agent code |
+| Protocol-Driven Execution | All tool calls route through `MCPClient.call_tool()` → JSON-RPC → MCP Server |
+| Multi-Tool Chaining | Agent loop supports chaining: check_availability → book → send_email in one turn |
+| Multi-Turn Memory | Structured sessions with entity tracking, action history, turn counting |
 | LLM Workflow Orchestration | Agentic loop with multi-step tool calling (check → book → notify) |
 | API Integration | Google Calendar, SMTP Email, Slack Webhooks, WebSocket |
 | Full-Stack Fluency | React ↔ FastAPI ↔ PostgreSQL with async throughout |
 | Code Readability | Modular structure, typed schemas, comprehensive docstrings |
 | Scalability | Async architecture, connection pooling, session management |
-| Agentic Design | Dynamic tool selection, multi-turn context, auto-rescheduling |

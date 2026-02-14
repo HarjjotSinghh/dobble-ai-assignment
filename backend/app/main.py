@@ -1,17 +1,34 @@
 """
-FastAPI Application Entry Point.
+FastAPI Application Entry Point with MCP Lifecycle Management.
 
-This is the main server that:
-1. Serves the REST API endpoints (auth, chat, appointments, notifications)
-2. Initializes the database and seeds demo data
-3. Configures CORS for the React frontend
-4. Provides health check and WebSocket support
+This is the HOST layer in the MCP architecture that:
+1. Manages the MCP client-server lifecycle (startup/shutdown)
+2. Serves the REST API endpoints (auth, chat, appointments, notifications)
+3. Initializes the database and seeds demo data
+4. Configures CORS for the React frontend
 
 Architecture:
-  React Frontend <--HTTP/WS--> FastAPI <--MCP Tools--> LLM Agent
-                                  |                        |
-                              PostgreSQL            External APIs
-                                                  (Calendar, Email, Slack)
+  ┌─────────────────────────────────────────────────────────┐
+  │  HOST APPLICATION (this file)                           │
+  │                                                         │
+  │  ┌─────────────────────────────────────────────────┐    │
+  │  │  MCP Client (app.state.mcp_client)              │    │
+  │  │  - Spawns MCP Server as subprocess              │    │
+  │  │  - Maintains persistent stdio connection        │    │
+  │  │  - Provides dynamic tool discovery              │    │
+  │  └──────────────────┬──────────────────────────────┘    │
+  │                     │ stdio transport (JSON-RPC 2.0)    │
+  │  ┌──────────────────▼──────────────────────────────┐    │
+  │  │  MCP Server (subprocess)                        │    │
+  │  │  mcp_server/server.py                           │    │
+  │  │  - 10 tools, 2 resources, 2 prompts             │    │
+  │  │  - Own database connection pool                 │    │
+  │  │  - External service integrations                │    │
+  │  └─────────────────────────────────────────────────┘    │
+  │                                                         │
+  │  Routers: auth, chat, appointments, notifications       │
+  │  Database: PostgreSQL (async via SQLAlchemy)             │
+  └─────────────────────────────────────────────────────────┘
 """
 
 import logging
@@ -22,6 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import init_db, async_session
 from app.routers import auth, chat, appointments, notifications
+from app.mcp_client.client import MCPClient
 
 # Configure logging
 logging.basicConfig(
@@ -33,29 +51,65 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application startup and shutdown lifecycle."""
-    logger.info("Starting Doctor Appointment MCP Server...")
+    """
+    Application startup and shutdown lifecycle.
 
-    # Initialize database tables
+    On startup:
+      1. Initialize database tables
+      2. Seed demo data
+      3. Start MCP server subprocess and connect MCP client
+      4. Store MCP client in app.state for request handlers
+
+    On shutdown:
+      1. Disconnect MCP client (terminates server subprocess)
+    """
+    logger.info("Starting Doctor Appointment MCP Application...")
+
+    # Step 1: Initialize database tables
     await init_db()
     logger.info("Database tables created/verified")
 
-    # Seed demo data
+    # Step 2: Seed demo data
     await seed_demo_data()
+
+    # Step 3: Start MCP client-server connection
+    mcp_client = MCPClient()
+    try:
+        await mcp_client.connect()
+        app.state.mcp_client = mcp_client
+
+        # Log discovered capabilities
+        capabilities = await mcp_client.get_server_capabilities()
+        logger.info(
+            f"MCP Server ready - "
+            f"Tools: {capabilities['tool_count']}, "
+            f"Resources: {capabilities['resource_count']}, "
+            f"Prompts: {capabilities['prompt_count']}"
+        )
+        logger.info(f"Available MCP tools: {capabilities['tools']}")
+    except Exception as e:
+        logger.error(f"Failed to start MCP server: {e}")
+        logger.warning("Application will start without MCP - chat features unavailable")
+        app.state.mcp_client = None
 
     yield
 
+    # Shutdown: disconnect MCP client and terminate server subprocess
     logger.info("Shutting down...")
+    if hasattr(app.state, "mcp_client") and app.state.mcp_client:
+        await app.state.mcp_client.disconnect()
+        logger.info("MCP Client disconnected, server subprocess terminated")
 
 
 app = FastAPI(
-    title="Doctor Appointment Assistant - MCP Server",
+    title="Doctor Appointment Assistant - MCP Architecture",
     description=(
-        "A smart doctor appointment and reporting assistant that uses "
-        "MCP (Model Context Protocol) to expose APIs and tools dynamically "
-        "discovered and invoked by an AI agent."
+        "A smart doctor appointment and reporting assistant built with "
+        "true MCP (Model Context Protocol) architecture. The LLM agent "
+        "discovers tools dynamically from the MCP server via the protocol "
+        "and routes all tool calls through the MCP client-server channel."
     ),
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -78,28 +132,53 @@ app.include_router(notifications.router)
 
 @app.get("/")
 async def root():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "service": "Doctor Appointment MCP Server",
-        "version": "1.0.0",
-        "mcp_tools": [
-            "list_doctors", "check_doctor_availability", "book_appointment",
-            "cancel_appointment", "get_appointment_stats", "get_patient_appointments",
-            "send_email_notification", "send_slack_notification",
-            "send_inapp_notification", "find_alternative_slots",
-        ],
-    }
+    """
+    Health check endpoint.
+
+    Returns MCP server status including dynamically discovered tools.
+    Tools are NOT hardcoded here - they are queried from the MCP client
+    which discovered them from the MCP server via the protocol.
+    """
+    mcp_client = getattr(app.state, "mcp_client", None)
+
+    if mcp_client and mcp_client.is_connected:
+        capabilities = await mcp_client.get_server_capabilities()
+        return {
+            "status": "healthy",
+            "service": "Doctor Appointment MCP Application",
+            "version": "2.0.0",
+            "mcp": {
+                "connected": True,
+                "tools": capabilities["tools"],
+                "tool_count": capabilities["tool_count"],
+                "resources": capabilities["resources"],
+                "prompts": capabilities["prompts"],
+            },
+        }
+    else:
+        return {
+            "status": "degraded",
+            "service": "Doctor Appointment MCP Application",
+            "version": "2.0.0",
+            "mcp": {"connected": False},
+        }
 
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    """Detailed health check including MCP server status."""
+    mcp_client = getattr(app.state, "mcp_client", None)
+    mcp_status = "connected" if (mcp_client and mcp_client.is_connected) else "disconnected"
+
+    return {
+        "status": "ok",
+        "mcp_server": mcp_status,
+    }
 
 
 async def seed_demo_data():
     """Seed demo data if the database is empty."""
-    from sqlalchemy import select, text
+    from sqlalchemy import select
     from app.models.models import User, Doctor, Patient, DoctorAvailability, Appointment, AppointmentStatus
     from passlib.context import CryptContext
     from datetime import date, time, datetime, timedelta
