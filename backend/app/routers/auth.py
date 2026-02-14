@@ -19,7 +19,7 @@ from app.models.models import User, Doctor, Patient, UserRole
 from app.schemas.schemas import UserRegister, UserLogin, TokenResponse, UserResponse
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 security = HTTPBearer()
 
 

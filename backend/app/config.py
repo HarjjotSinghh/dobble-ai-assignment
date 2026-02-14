@@ -4,6 +4,17 @@ from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 
+# Determine absolute path to .env file
+import os
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_FILE = BASE_DIR / ".env"
+
+if not ENV_FILE.exists():
+     print(f"WARNING: .env file not found at {ENV_FILE}")
+else:
+     print(f"Loading .env from {ENV_FILE}")
+
 class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/doctor_appointment"
@@ -37,7 +48,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     FRONTEND_URL: str = "http://localhost:5173"
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {"env_file": str(ENV_FILE), "extra": "ignore"}
 
 
 @lru_cache()

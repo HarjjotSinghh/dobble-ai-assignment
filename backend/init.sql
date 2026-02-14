@@ -1,13 +1,13 @@
 -- Seed data for doctor appointment system
 -- This runs automatically when PostgreSQL container starts
 
--- Insert demo users (passwords are bcrypt hash of "password123")
+-- Insert demo users (passwords are pbkdf2_sha256 hash of "password123")
 INSERT INTO users (email, password_hash, name, role, created_at) VALUES
-('dr.ahuja@hospital.com', '$2b$12$LJ3m4ys3Lp5v8Bq0D5Y8XOZmFJ3Q2YxKrE5VdNJQ1P3rF6R8h5TKa', 'Dr. Priya Ahuja', 'doctor', NOW()),
-('dr.sharma@hospital.com', '$2b$12$LJ3m4ys3Lp5v8Bq0D5Y8XOZmFJ3Q2YxKrE5VdNJQ1P3rF6R8h5TKa', 'Dr. Rahul Sharma', 'doctor', NOW()),
-('dr.patel@hospital.com', '$2b$12$LJ3m4ys3Lp5v8Bq0D5Y8XOZmFJ3Q2YxKrE5VdNJQ1P3rF6R8h5TKa', 'Dr. Anita Patel', 'doctor', NOW()),
-('patient.john@email.com', '$2b$12$LJ3m4ys3Lp5v8Bq0D5Y8XOZmFJ3Q2YxKrE5VdNJQ1P3rF6R8h5TKa', 'John Doe', 'patient', NOW()),
-('patient.jane@email.com', '$2b$12$LJ3m4ys3Lp5v8Bq0D5Y8XOZmFJ3Q2YxKrE5VdNJQ1P3rF6R8h5TKa', 'Jane Smith', 'patient', NOW())
+('dr.ahuja@hospital.com', '$pbkdf2-sha256$29000$WiuFUEqpFYIwphSilFLq/Q$K1vcrX3O/fW4XiKwqG4iBn.wOJWVQy02Wyu.neArMrQ', 'Dr. Priya Ahuja', 'doctor', NOW()),
+('dr.sharma@hospital.com', '$pbkdf2-sha256$29000$WiuFUEqpFYIwphSilFLq/Q$K1vcrX3O/fW4XiKwqG4iBn.wOJWVQy02Wyu.neArMrQ', 'Dr. Rahul Sharma', 'doctor', NOW()),
+('dr.patel@hospital.com', '$pbkdf2-sha256$29000$WiuFUEqpFYIwphSilFLq/Q$K1vcrX3O/fW4XiKwqG4iBn.wOJWVQy02Wyu.neArMrQ', 'Dr. Anita Patel', 'doctor', NOW()),
+('patient.john@email.com', '$pbkdf2-sha256$29000$WiuFUEqpFYIwphSilFLq/Q$K1vcrX3O/fW4XiKwqG4iBn.wOJWVQy02Wyu.neArMrQ', 'John Doe', 'patient', NOW()),
+('patient.jane@email.com', '$pbkdf2-sha256$29000$WiuFUEqpFYIwphSilFLq/Q$K1vcrX3O/fW4XiKwqG4iBn.wOJWVQy02Wyu.neArMrQ', 'Jane Smith', 'patient', NOW())
 ON CONFLICT (email) DO NOTHING;
 
 -- Insert doctor profiles

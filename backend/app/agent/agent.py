@@ -283,6 +283,12 @@ class DoctorAppointmentAgent:
         """Execute agent loop using OpenAI's function calling."""
         from openai import AsyncOpenAI
 
+        api_key = self.settings.OPENAI_API_KEY
+        masked_key = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "EMPTY/NONE"
+        logger.info(f"Agents initialized with OpenAI API Key: {masked_key}, Length: {len(api_key) if api_key else 0}")
+        if not api_key:
+             logger.error("OpenAI API Key is missing in settings!")
+
         client = AsyncOpenAI(api_key=self.settings.OPENAI_API_KEY)
         messages = [{"role": "system", "content": system}] + history
         tools = get_tool_definitions()

@@ -13,10 +13,18 @@ function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-slate-600">Loading...</p>
+      <div className="min-h-screen flex items-center justify-center bg-white font-sans">
+        <div className="text-center space-y-6 animate-fade-in">
+          <div className="relative">
+            <div className="w-16 h-16 border-2 border-slate-100 border-t-slate-900 rounded-full animate-spin mx-auto"></div>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="w-2 h-2 bg-slate-900 rounded-full animate-pulse"></div>
+            </div>
+          </div>
+          <div>
+            <h2 className="text-lg font-display font-bold text-slate-900 tracking-tight">CareBridge</h2>
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-700 font-black mt-1">Initializing Intelligence</p>
+          </div>
         </div>
       </div>
     );

@@ -104,7 +104,7 @@ async def seed_demo_data():
     from passlib.context import CryptContext
     from datetime import date, time, datetime, timedelta
 
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
     async with async_session() as db:
         # Check if users already exist
