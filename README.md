@@ -4,6 +4,11 @@
 
 A smart doctor appointment and reporting assistant that uses **MCP (Model Context Protocol)** to expose APIs and tools dynamically discovered and invoked by an AI agent (LLM). The system demonstrates agentic behavior where the AI decides what tools to use, when to use them, and how to combine them to fulfill user prompts.
 
+## Screenshots:
+
+![Doctor Dashboard](screenshots/doctor_notification.png)
+![Patient Dashboard](screenshots/patient_booking.png)
+
 ---
 
 ## Architecture Overview
