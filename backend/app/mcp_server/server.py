@@ -1,347 +1,427 @@
 """
-MCP (Model Context Protocol) Server Implementation.
+MCP Server - Standalone Model Context Protocol Server.
 
-This server exposes tools, resources, and prompts that allow an LLM agent
-to dynamically discover and invoke backend capabilities for:
-- Checking doctor availability
-- Booking appointments
-- Querying appointment statistics
-- Sending notifications (email, Slack, in-app)
+This is a proper MCP server that exposes tools, resources, and prompts
+through the standardized MCP protocol. It runs as an independent process
+and communicates with the MCP client via stdio transport.
 
-Architecture:
-  MCP Client (LLM Agent) <---> MCP Server <---> FastAPI/DB/External APIs
+Architecture (MCP Design Pattern):
+  ┌──────────────────────────────────────────┐
+  │  HOST (FastAPI Application)              │
+  │  ┌────────────────────────────────────┐  │
+  │  │  MCP Client (mcp_client/client.py) │  │
+  │  └──────────┬─────────────────────────┘  │
+  └─────────────┼────────────────────────────┘
+                │  stdio transport (JSON-RPC 2.0)
+  ┌─────────────▼────────────────────────────┐
+  │  MCP Server (this file)                  │
+  │  ├── Tools (10 medical appointment tools)│
+  │  ├── Resources (doctor directory, etc.)  │
+  │  ├── Prompts (booking, reports)          │
+  │  └── Database + External Services        │
+  └──────────────────────────────────────────┘
+
+The server dynamically exposes capabilities that the MCP client
+discovers at runtime via the protocol's tools/list, resources/list,
+and prompts/list methods - NOT hardcoded in the agent.
 """
 
-from datetime import datetime, date, time, timedelta
-from typing import Any
-from mcp.server import Server
-from mcp.types import (
-    Tool,
-    TextContent,
-    Resource,
-    ResourceTemplate,
-    Prompt,
-    PromptMessage,
-    PromptArgument,
-)
+import sys
+import os
 import json
 import logging
+import asyncio
+from datetime import datetime, date, time, timedelta
+from typing import Any, Optional
+from pathlib import Path
 
+# Ensure the backend directory is on the Python path so we can import app modules
+# when this script runs as a subprocess
+_backend_dir = str(Path(__file__).resolve().parent.parent.parent)
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
+from mcp.server.fastmcp import FastMCP
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Create the MCP server instance
-mcp_server = Server("doctor-appointment-mcp")
+# ═══════════════════════════════════════════════════════════════════════════════
+# MCP SERVER INSTANCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+mcp = FastMCP(
+    "doctor-appointment-mcp",
+    instructions=(
+        "MCP server for a doctor appointment scheduling system. "
+        "Provides tools for listing doctors, checking availability, "
+        "booking/cancelling appointments, generating reports, and "
+        "sending multi-channel notifications."
+    ),
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TOOL DEFINITIONS - These are dynamically discoverable by the LLM agent
+# DATABASE SESSION FACTORY (for standalone subprocess execution)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp_server.list_tools()
-async def list_tools() -> list[Tool]:
-    """Return all available tools the LLM agent can invoke."""
-    return [
-        Tool(
-            name="list_doctors",
-            description="List all available doctors with their specializations. Use this when the user wants to know which doctors are available or asks about a specific doctor.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "specialization": {
-                        "type": "string",
-                        "description": "Filter by specialization (e.g., 'General Physician', 'Cardiologist'). Optional.",
-                    }
-                },
-            },
-        ),
-        Tool(
-            name="check_doctor_availability",
-            description="Check a doctor's available time slots for a specific date. Returns available 30-minute slots based on the doctor's schedule and existing appointments.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "doctor_id": {
-                        "type": "integer",
-                        "description": "The doctor's ID",
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "Date to check availability (YYYY-MM-DD format)",
-                    },
-                },
-                "required": ["doctor_id", "date"],
-            },
-        ),
-        Tool(
-            name="book_appointment",
-            description="Book an appointment with a doctor. This will create the appointment in the database, optionally add it to Google Calendar, and send an email confirmation to the patient.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "doctor_id": {
-                        "type": "integer",
-                        "description": "The doctor's ID",
-                    },
-                    "patient_id": {
-                        "type": "integer",
-                        "description": "The patient's ID",
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "Appointment date (YYYY-MM-DD)",
-                    },
-                    "start_time": {
-                        "type": "string",
-                        "description": "Start time (HH:MM format, e.g., '09:00')",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Reason for the appointment",
-                    },
-                },
-                "required": ["doctor_id", "patient_id", "date", "start_time"],
-            },
-        ),
-        Tool(
-            name="cancel_appointment",
-            description="Cancel an existing appointment by its ID.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "appointment_id": {
-                        "type": "integer",
-                        "description": "The appointment ID to cancel",
-                    },
-                },
-                "required": ["appointment_id"],
-            },
-        ),
-        Tool(
-            name="get_appointment_stats",
-            description="Get appointment statistics for a doctor. Useful for generating summary reports about patient visits, upcoming appointments, and reasons for visits.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "doctor_id": {
-                        "type": "integer",
-                        "description": "The doctor's ID",
-                    },
-                    "date_from": {
-                        "type": "string",
-                        "description": "Start date for the report (YYYY-MM-DD). Defaults to today.",
-                    },
-                    "date_to": {
-                        "type": "string",
-                        "description": "End date for the report (YYYY-MM-DD). Defaults to today.",
-                    },
-                },
-                "required": ["doctor_id"],
-            },
-        ),
-        Tool(
-            name="get_patient_appointments",
-            description="Get a patient's appointments (past and upcoming).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "patient_id": {
-                        "type": "integer",
-                        "description": "The patient's ID",
-                    },
-                    "status": {
-                        "type": "string",
-                        "description": "Filter by status: 'scheduled', 'completed', 'cancelled'. Optional.",
-                    },
-                },
-                "required": ["patient_id"],
-            },
-        ),
-        Tool(
-            name="send_email_notification",
-            description="Send an email notification to a user (patient or doctor).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "to_email": {
-                        "type": "string",
-                        "description": "Recipient email address",
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Email subject",
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Email body content",
-                    },
-                },
-                "required": ["to_email", "subject", "body"],
-            },
-        ),
-        Tool(
-            name="send_slack_notification",
-            description="Send a notification via Slack webhook. Used for doctor summary reports and alerts.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message to send to Slack",
-                    },
-                },
-                "required": ["message"],
-            },
-        ),
-        Tool(
-            name="send_inapp_notification",
-            description="Send an in-app notification to a user. This is stored in the database and delivered via the frontend.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "user_id": {
-                        "type": "integer",
-                        "description": "The user ID to notify",
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Notification title",
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Notification message",
-                    },
-                    "type": {
-                        "type": "string",
-                        "description": "Notification type: 'info', 'success', 'warning'",
-                    },
-                },
-                "required": ["user_id", "title", "message"],
-            },
-        ),
-        Tool(
-            name="find_alternative_slots",
-            description="When a requested slot is unavailable, find the next available slots for the doctor. Supports auto-rescheduling.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "doctor_id": {
-                        "type": "integer",
-                        "description": "The doctor's ID",
-                    },
-                    "preferred_date": {
-                        "type": "string",
-                        "description": "The preferred date (YYYY-MM-DD). Will search from this date forward.",
-                    },
-                    "num_slots": {
-                        "type": "integer",
-                        "description": "Number of alternative slots to return (default: 3)",
-                    },
-                },
-                "required": ["doctor_id", "preferred_date"],
-            },
-        ),
-    ]
+_engine = None
+_async_session_factory = None
+
+
+async def _get_db_session():
+    """Create a database session for tool execution.
+
+    The MCP server runs as an independent process, so it manages
+    its own database connections separate from the FastAPI host.
+    """
+    global _engine, _async_session_factory
+
+    if _engine is None:
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+        from app.config import get_settings
+
+        settings = get_settings()
+        _engine = create_async_engine(settings.DATABASE_URL, echo=False, pool_pre_ping=True)
+        _async_session_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+
+    return _async_session_factory()
+
+
+def _get_tool_handlers():
+    """Lazy import to avoid circular dependencies at module level."""
+    from app.mcp_server.tool_handlers import ToolHandlers
+    return ToolHandlers
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# RESOURCE DEFINITIONS - Expose data sources via MCP
+# TOOL DEFINITIONS - Dynamically discoverable via MCP tools/list protocol
+#
+# Each tool is registered with the MCP server using @mcp.tool() decorator.
+# The MCP client discovers these at runtime by calling session.list_tools().
+# Tool schemas (name, description, input_schema) are auto-generated from
+# the function signatures and docstrings.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp_server.list_resources()
-async def list_resources() -> list[Resource]:
-    """List available MCP resources."""
-    return [
-        Resource(
-            uri="doctor://list",
-            name="Doctor Directory",
-            description="List of all doctors and their specializations",
-            mimeType="application/json",
-        ),
-        Resource(
-            uri="appointment://today",
-            name="Today's Appointments",
-            description="All appointments scheduled for today",
-            mimeType="application/json",
-        ),
-    ]
+
+@mcp.tool()
+async def list_doctors(specialization: str = "") -> str:
+    """List all available doctors with their specializations.
+    Use this when the user wants to know which doctors are available
+    or asks about a specific specialization.
+
+    Args:
+        specialization: Filter by specialization (e.g., 'General Physician', 'Cardiologist'). Optional.
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.list_doctors({"specialization": specialization or None})
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
 
 
-@mcp_server.list_resource_templates()
-async def list_resource_templates() -> list[ResourceTemplate]:
-    """List available resource templates for dynamic data."""
-    return [
-        ResourceTemplate(
-            uriTemplate="doctor://{doctor_id}/schedule/{date}",
-            name="Doctor Schedule",
-            description="Get a specific doctor's schedule for a given date",
-            mimeType="application/json",
-        ),
-    ]
+@mcp.tool()
+async def check_doctor_availability(doctor_id: int, date: str) -> str:
+    """Check a doctor's available time slots for a specific date.
+    Returns available 30-minute slots based on the doctor's schedule
+    and existing appointments.
+
+    Args:
+        doctor_id: The doctor's ID
+        date: Date to check availability (YYYY-MM-DD format)
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.check_doctor_availability({
+            "doctor_id": doctor_id,
+            "date": date,
+        })
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+@mcp.tool()
+async def book_appointment(
+    doctor_id: int,
+    patient_id: int,
+    date: str,
+    start_time: str,
+    reason: str = "",
+) -> str:
+    """Book an appointment with a doctor. This creates the appointment
+    in the database, optionally adds it to Google Calendar, and sends
+    an email confirmation to the patient.
+
+    Args:
+        doctor_id: The doctor's ID
+        patient_id: The patient's ID
+        date: Appointment date (YYYY-MM-DD)
+        start_time: Start time (HH:MM format, e.g., '09:00')
+        reason: Reason for the appointment (optional)
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.book_appointment({
+            "doctor_id": doctor_id,
+            "patient_id": patient_id,
+            "date": date,
+            "start_time": start_time,
+            "reason": reason,
+        })
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+@mcp.tool()
+async def cancel_appointment(appointment_id: int) -> str:
+    """Cancel an existing appointment by its ID.
+
+    Args:
+        appointment_id: The appointment ID to cancel
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.cancel_appointment({
+            "appointment_id": appointment_id,
+        })
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+@mcp.tool()
+async def get_appointment_stats(
+    doctor_id: int,
+    date_from: str = "",
+    date_to: str = "",
+) -> str:
+    """Get appointment statistics for a doctor. Useful for generating
+    summary reports about patient visits, upcoming appointments,
+    and reasons for visits.
+
+    Args:
+        doctor_id: The doctor's ID
+        date_from: Start date for the report (YYYY-MM-DD). Defaults to today.
+        date_to: End date for the report (YYYY-MM-DD). Defaults to today.
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        args = {"doctor_id": doctor_id}
+        if date_from:
+            args["date_from"] = date_from
+        if date_to:
+            args["date_to"] = date_to
+        result = await handlers.get_appointment_stats(args)
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+@mcp.tool()
+async def get_patient_appointments(
+    patient_id: int,
+    status: str = "",
+) -> str:
+    """Get a patient's appointments (past and upcoming).
+
+    Args:
+        patient_id: The patient's ID
+        status: Filter by status: 'scheduled', 'completed', 'cancelled'. Optional.
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        args = {"patient_id": patient_id}
+        if status:
+            args["status"] = status
+        result = await handlers.get_patient_appointments(args)
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+@mcp.tool()
+async def send_email_notification(
+    to_email: str,
+    subject: str,
+    body: str,
+) -> str:
+    """Send an email notification to a user (patient or doctor).
+
+    Args:
+        to_email: Recipient email address
+        subject: Email subject line
+        body: Email body content (supports HTML)
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.send_email_notification({
+            "to_email": to_email,
+            "subject": subject,
+            "body": body,
+        })
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+@mcp.tool()
+async def send_slack_notification(message: str) -> str:
+    """Send a notification via Slack webhook. Used for doctor summary
+    reports and operational alerts.
+
+    Args:
+        message: The message to send to Slack
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.send_slack_notification({"message": message})
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+@mcp.tool()
+async def send_inapp_notification(
+    user_id: int,
+    title: str,
+    message: str,
+    type: str = "info",
+) -> str:
+    """Send an in-app notification to a user. This is stored in the
+    database and delivered via WebSocket to the frontend in real time.
+
+    Args:
+        user_id: The user ID to notify
+        title: Notification title
+        message: Notification message
+        type: Notification type: 'info', 'success', or 'warning'
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.send_inapp_notification({
+            "user_id": user_id,
+            "title": title,
+            "message": message,
+            "type": type,
+        })
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+@mcp.tool()
+async def find_alternative_slots(
+    doctor_id: int,
+    preferred_date: str,
+    num_slots: int = 3,
+) -> str:
+    """When a requested slot is unavailable, find the next available
+    slots for the doctor. Supports auto-rescheduling by searching
+    up to 7 days forward from the preferred date.
+
+    Args:
+        doctor_id: The doctor's ID
+        preferred_date: The preferred date (YYYY-MM-DD). Will search from this date forward.
+        num_slots: Number of alternative slots to return (default: 3)
+    """
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.find_alternative_slots({
+            "doctor_id": doctor_id,
+            "preferred_date": preferred_date,
+            "num_slots": num_slots,
+        })
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PROMPT DEFINITIONS - Pre-built prompt templates for common tasks
+# RESOURCE DEFINITIONS - Data sources exposed via MCP resources/list
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp_server.list_prompts()
-async def list_prompts() -> list[Prompt]:
-    """List available prompt templates."""
-    return [
-        Prompt(
-            name="book_appointment",
-            description="Help a patient book an appointment with a doctor",
-            arguments=[
-                PromptArgument(
-                    name="doctor_name",
-                    description="Name of the doctor",
-                    required=True,
-                ),
-                PromptArgument(
-                    name="preferred_time",
-                    description="Preferred date and time",
-                    required=True,
-                ),
-            ],
-        ),
-        Prompt(
-            name="doctor_daily_summary",
-            description="Generate a daily summary report for a doctor",
-            arguments=[
-                PromptArgument(
-                    name="doctor_name",
-                    description="Name of the doctor",
-                    required=True,
-                ),
-            ],
-        ),
-    ]
+
+@mcp.resource("doctor://list")
+async def get_doctor_list() -> str:
+    """List of all doctors and their specializations."""
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.list_doctors({})
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
 
 
-@mcp_server.get_prompt()
-async def get_prompt(name: str, arguments: dict[str, str] | None = None) -> list[PromptMessage]:
-    """Return prompt messages for a given prompt template."""
-    if name == "book_appointment":
-        return [
-            PromptMessage(
-                role="user",
-                content=TextContent(
-                    type="text",
-                    text=f"I want to book an appointment with {arguments.get('doctor_name', 'a doctor')} "
-                         f"at {arguments.get('preferred_time', 'the earliest available time')}. "
-                         f"Please check availability and book it for me.",
-                ),
-            )
-        ]
-    elif name == "doctor_daily_summary":
-        return [
-            PromptMessage(
-                role="user",
-                content=TextContent(
-                    type="text",
-                    text=f"Generate a comprehensive daily summary report for {arguments.get('doctor_name', 'the doctor')}. "
-                         f"Include: number of appointments today, patient details, reasons for visits, "
-                         f"and any completed appointments from yesterday.",
-                ),
-            )
-        ]
-    return []
+@mcp.resource("doctor://{doctor_id}/schedule/{schedule_date}")
+async def get_doctor_schedule(doctor_id: str, schedule_date: str) -> str:
+    """Get a specific doctor's schedule for a given date."""
+    db = await _get_db_session()
+    try:
+        handlers = _get_tool_handlers()(db)
+        result = await handlers.check_doctor_availability({
+            "doctor_id": int(doctor_id),
+            "date": schedule_date,
+        })
+        return json.dumps(result, default=str)
+    finally:
+        await db.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROMPT TEMPLATES - Pre-built prompt templates discoverable via prompts/list
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@mcp.prompt()
+def book_appointment_prompt(doctor_name: str, preferred_time: str) -> str:
+    """Help a patient book an appointment with a doctor.
+
+    Args:
+        doctor_name: Name of the doctor
+        preferred_time: Preferred date and time
+    """
+    return (
+        f"I want to book an appointment with {doctor_name} "
+        f"at {preferred_time}. Please check availability and book it for me."
+    )
+
+
+@mcp.prompt()
+def doctor_daily_summary_prompt(doctor_name: str) -> str:
+    """Generate a daily summary report for a doctor.
+
+    Args:
+        doctor_name: Name of the doctor
+    """
+    return (
+        f"Generate a comprehensive daily summary report for {doctor_name}. "
+        f"Include: number of appointments today, patient details, reasons for visits, "
+        f"and any completed appointments from yesterday."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STANDALONE ENTRY POINT
+#
+# When run directly (python -m app.mcp_server.server or python server.py),
+# the MCP server starts with stdio transport for protocol communication.
+# The MCP client spawns this as a subprocess and connects via stdin/stdout.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    logger.info("Starting MCP Server (doctor-appointment-mcp) with stdio transport...")
+    mcp.run(transport="stdio")

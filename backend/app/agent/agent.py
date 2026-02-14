@@ -1,42 +1,52 @@
 """
-LLM Agent with MCP Tool Integration.
+LLM Agent with MCP Protocol-Driven Tool Integration.
 
-This is the core agentic component that:
-1. Receives natural language input from users
-2. Maintains conversation context across multiple turns
-3. Dynamically decides which MCP tools to invoke
-4. Orchestrates multi-step workflows (check availability -> book -> notify)
-5. Returns human-readable responses
+This is the agentic orchestration layer (HOST component in MCP architecture)
+that bridges between the LLM and the MCP protocol:
 
-Supports both OpenAI and Anthropic LLMs with function/tool calling.
+  1. Discovers available tools DYNAMICALLY from the MCP server via the client
+  2. Converts MCP tool schemas to LLM-compatible function definitions
+  3. Routes LLM tool calls through the MCP client (protocol-driven)
+  4. Maintains multi-turn conversation context via structured sessions
+  5. Orchestrates multi-step workflows (check -> book -> notify)
+
+Architecture:
+  User Prompt
+       │
+  ┌────▼────────────────────────────────────────────────────────────────┐
+  │  AGENT LOOP (this module)                                          │
+  │                                                                    │
+  │  1. Query MCP Client → discover_tools() → [tools/list protocol]   │
+  │  2. Convert schemas → get_tools_for_llm() → OpenAI/Anthropic fmt  │
+  │  3. Send to LLM with tool definitions + conversation history      │
+  │  4. LLM decides: call tool(s) or return final answer              │
+  │  5. Route tool_call → MCP Client → call_tool() → [tools/call]    │
+  │  6. Feed result back to LLM as tool_result                        │
+  │  7. Repeat from step 4 until LLM gives final text response        │
+  │                                                                    │
+  └────┬────────────────────────────────────────────────────────────────┘
+       │
+  Final Response to User
+
+The agent NEVER directly calls tool handlers. All tool execution flows
+through the MCP protocol: Agent → MCP Client → MCP Server → Tool Handler.
 """
 
 import json
 import logging
-from datetime import datetime, date
+from datetime import date
 from typing import Any, Optional
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.mcp_server.tool_handlers import ToolHandlers
+from app.mcp_client.client import MCPClient
 
 logger = logging.getLogger(__name__)
 
-# System prompt that defines the agent's behavior and available tools
+# System prompt that defines the agent's behavior
+# Tool descriptions are NOT listed here - they come dynamically from MCP
 SYSTEM_PROMPT = """You are a smart medical appointment assistant. You help patients book appointments with doctors and help doctors view their schedules and reports.
 
-You have access to the following tools via MCP (Model Context Protocol):
-
-1. **list_doctors** - List available doctors and their specializations
-2. **check_doctor_availability** - Check a doctor's available time slots for a date
-3. **book_appointment** - Book an appointment (creates DB record + Google Calendar event + email confirmation)
-4. **cancel_appointment** - Cancel an existing appointment
-5. **get_appointment_stats** - Get appointment statistics/summary for a doctor
-6. **get_patient_appointments** - View a patient's appointments
-7. **send_email_notification** - Send email to a user
-8. **send_slack_notification** - Send Slack message (for doctor reports)
-9. **send_inapp_notification** - Send in-app notification
-10. **find_alternative_slots** - Find alternative slots when preferred time is unavailable
+You have access to tools dynamically provided via MCP (Model Context Protocol). Use the tools available to you to fulfill user requests.
 
 **Important behavioral rules:**
 - When a patient wants to book, ALWAYS check availability first before booking.
@@ -58,177 +68,27 @@ You have access to the following tools via MCP (Model Context Protocol):
 """
 
 
-def get_tool_definitions() -> list[dict]:
-    """Return OpenAI-compatible function definitions for all MCP tools."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "list_doctors",
-                "description": "List all available doctors with their specializations.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "specialization": {"type": "string", "description": "Filter by specialization (optional)"}
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "check_doctor_availability",
-                "description": "Check available time slots for a doctor on a specific date.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "doctor_id": {"type": "integer", "description": "Doctor's ID"},
-                        "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
-                    },
-                    "required": ["doctor_id", "date"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "book_appointment",
-                "description": "Book an appointment. Creates DB record, Google Calendar event, and sends email confirmation.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "doctor_id": {"type": "integer", "description": "Doctor's ID"},
-                        "patient_id": {"type": "integer", "description": "Patient's ID"},
-                        "date": {"type": "string", "description": "Date in YYYY-MM-DD"},
-                        "start_time": {"type": "string", "description": "Start time HH:MM"},
-                        "reason": {"type": "string", "description": "Reason for visit"},
-                    },
-                    "required": ["doctor_id", "patient_id", "date", "start_time"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "cancel_appointment",
-                "description": "Cancel an existing appointment by ID.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "appointment_id": {"type": "integer", "description": "Appointment ID"},
-                    },
-                    "required": ["appointment_id"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_appointment_stats",
-                "description": "Get appointment statistics for a doctor in a date range.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "doctor_id": {"type": "integer", "description": "Doctor's ID"},
-                        "date_from": {"type": "string", "description": "Start date YYYY-MM-DD (defaults to today)"},
-                        "date_to": {"type": "string", "description": "End date YYYY-MM-DD (defaults to today)"},
-                    },
-                    "required": ["doctor_id"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_patient_appointments",
-                "description": "Get a patient's appointment history.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "patient_id": {"type": "integer", "description": "Patient's ID"},
-                        "status": {"type": "string", "description": "Filter: scheduled, completed, cancelled"},
-                    },
-                    "required": ["patient_id"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "send_email_notification",
-                "description": "Send an email notification.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "to_email": {"type": "string", "description": "Recipient email"},
-                        "subject": {"type": "string", "description": "Subject"},
-                        "body": {"type": "string", "description": "Email body (HTML)"},
-                    },
-                    "required": ["to_email", "subject", "body"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "send_slack_notification",
-                "description": "Send a Slack notification (used for doctor reports).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "message": {"type": "string", "description": "Message to send"},
-                    },
-                    "required": ["message"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "send_inapp_notification",
-                "description": "Send an in-app notification to a user.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "user_id": {"type": "integer", "description": "User ID"},
-                        "title": {"type": "string", "description": "Title"},
-                        "message": {"type": "string", "description": "Message"},
-                        "type": {"type": "string", "description": "'info', 'success', or 'warning'"},
-                    },
-                    "required": ["user_id", "title", "message"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "find_alternative_slots",
-                "description": "Find alternative available slots when preferred time is unavailable.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "doctor_id": {"type": "integer", "description": "Doctor's ID"},
-                        "preferred_date": {"type": "string", "description": "Preferred date YYYY-MM-DD"},
-                        "num_slots": {"type": "integer", "description": "Number of alternatives (default: 3)"},
-                    },
-                    "required": ["doctor_id", "preferred_date"],
-                },
-            },
-        },
-    ]
-
-
 class DoctorAppointmentAgent:
     """
-    Agentic AI that uses MCP tools to handle doctor appointments.
+    Agentic AI orchestrator that uses MCP protocol for tool discovery and execution.
 
-    The agent maintains conversation history for multi-turn interactions
-    and dynamically selects which tools to invoke based on user intent.
+    This agent follows the MCP Host pattern:
+    - Tools are NOT hardcoded; they are discovered dynamically from the MCP server
+    - Tool calls flow through the MCP client (protocol-driven, not direct calls)
+    - The LLM decides which tools to invoke based on discovered capabilities
+    - Multi-tool chaining happens naturally through the agent loop
     """
 
-    def __init__(self, db: AsyncSession):
-        self.db = db
-        self.tool_handlers = ToolHandlers(db)
+    def __init__(self, mcp_client: MCPClient):
+        """
+        Initialize the agent with an MCP client connection.
+
+        Args:
+            mcp_client: Connected MCP client for tool discovery and invocation.
+                        The agent does NOT receive a database session - all data
+                        access goes through the MCP protocol.
+        """
+        self.mcp_client = mcp_client
         self.settings = get_settings()
 
     async def process_message(
@@ -238,19 +98,39 @@ class DoctorAppointmentAgent:
         user_context: dict,
     ) -> tuple[str, list[dict], list[str]]:
         """
-        Process a user message using the LLM agent.
+        Process a user message using the LLM agent with MCP tool integration.
+
+        Orchestration flow:
+          1. Discover tools from MCP server (dynamic, not static)
+          2. Build system prompt with user context
+          3. Send to LLM with dynamically-discovered tool schemas
+          4. Execute agent loop: LLM → tool_call → MCP Client → result → LLM
+          5. Return final response with conversation history and actions taken
 
         Args:
             user_message: The user's natural language input
-            conversation_history: Previous messages for context continuity
-            user_context: User info (role, id, name, etc.)
+            conversation_history: Previous messages for multi-turn context
+            user_context: User info (role, id, name, profile_id)
 
         Returns:
             tuple: (agent_response, updated_history, actions_taken)
         """
         actions_taken = []
 
-        # Build system prompt with user context
+        # Step 1: Dynamically discover tools from MCP server via protocol
+        # This calls tools/list on the MCP server - tools are NOT hardcoded
+        try:
+            await self.mcp_client.discover_tools()
+            logger.info("Agent dynamically discovered tools from MCP server")
+        except Exception as e:
+            logger.error(f"Failed to discover tools from MCP server: {e}")
+            return (
+                "I'm having trouble connecting to the tool server. Please try again.",
+                conversation_history,
+                actions_taken,
+            )
+
+        # Step 2: Build system prompt with user context
         system = SYSTEM_PROMPT.format(
             today=date.today().strftime("%Y-%m-%d (%A)"),
             role=user_context.get("role", "patient"),
@@ -259,10 +139,10 @@ class DoctorAppointmentAgent:
             user_name=user_context.get("name", "User"),
         )
 
-        # Add new user message to history
+        # Step 3: Add user message to conversation history
         conversation_history.append({"role": "user", "content": user_message})
 
-        # Use OpenAI or Anthropic based on config
+        # Step 4: Run agent loop with the appropriate LLM provider
         if self.settings.LLM_PROVIDER == "anthropic" and self.settings.ANTHROPIC_API_KEY:
             response_text, actions_taken = await self._call_anthropic(
                 system, conversation_history, actions_taken
@@ -272,7 +152,7 @@ class DoctorAppointmentAgent:
                 system, conversation_history, actions_taken
             )
 
-        # Add assistant response to history
+        # Step 5: Add assistant response to history
         conversation_history.append({"role": "assistant", "content": response_text})
 
         return response_text, conversation_history, actions_taken
@@ -280,22 +160,25 @@ class DoctorAppointmentAgent:
     async def _call_openai(
         self, system: str, history: list[dict], actions: list[str]
     ) -> tuple[str, list[str]]:
-        """Execute agent loop using OpenAI's function calling."""
-        from openai import AsyncOpenAI
+        """
+        Execute the agent loop using OpenAI's function calling.
 
-        api_key = self.settings.OPENAI_API_KEY
-        masked_key = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "EMPTY/NONE"
-        logger.info(f"Agents initialized with OpenAI API Key: {masked_key}, Length: {len(api_key) if api_key else 0}")
-        if not api_key:
-             logger.error("OpenAI API Key is missing in settings!")
+        Tool definitions come from MCP (dynamically discovered),
+        and tool calls are routed through the MCP client.
+        """
+        from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=self.settings.OPENAI_API_KEY)
         messages = [{"role": "system", "content": system}] + history
-        tools = get_tool_definitions()
 
-        # Agent loop: keep calling until no more tool calls
+        # Get tool definitions dynamically from MCP (not hardcoded)
+        tools = self.mcp_client.get_tools_for_llm(format="openai")
+
+        # Agent loop: LLM decides → call tool via MCP → feed result → repeat
         max_iterations = 10
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
+            logger.info(f"Agent loop iteration {iteration + 1}/{max_iterations}")
+
             response = await client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
@@ -305,22 +188,26 @@ class DoctorAppointmentAgent:
 
             choice = response.choices[0]
 
-            # If no tool calls, return the response
+            # If no tool calls, the LLM has produced its final answer
             if not choice.message.tool_calls:
                 return choice.message.content or "I'm sorry, I couldn't process that.", actions
 
-            # Process each tool call
+            # Process tool calls through MCP protocol
             messages.append(choice.message)
 
             for tool_call in choice.message.tool_calls:
                 tool_name = tool_call.function.name
                 tool_args = json.loads(tool_call.function.arguments)
 
-                logger.info(f"Agent invoking MCP tool: {tool_name}({tool_args})")
+                logger.info(f"Agent routing tool call through MCP: {tool_name}({tool_args})")
                 actions.append(f"Called {tool_name}")
 
-                # Execute via MCP tool handler
-                result = await self.tool_handlers.handle_tool_call(tool_name, tool_args)
+                # Route through MCP Client → MCP Server (protocol-driven)
+                try:
+                    result = await self.mcp_client.call_tool(tool_name, tool_args)
+                except Exception as e:
+                    logger.error(f"MCP tool call failed: {tool_name}: {e}")
+                    result = json.dumps({"error": f"Tool execution failed: {str(e)}"})
 
                 messages.append({
                     "role": "tool",
@@ -333,24 +220,26 @@ class DoctorAppointmentAgent:
     async def _call_anthropic(
         self, system: str, history: list[dict], actions: list[str]
     ) -> tuple[str, list[str]]:
-        """Execute agent loop using Anthropic's tool use."""
+        """
+        Execute the agent loop using Anthropic's tool use.
+
+        Tool definitions come from MCP (dynamically discovered),
+        and tool calls are routed through the MCP client.
+        """
         from anthropic import AsyncAnthropic
 
         client = AsyncAnthropic(api_key=self.settings.ANTHROPIC_API_KEY)
 
-        # Convert tool definitions to Anthropic format
-        tools = []
-        for t in get_tool_definitions():
-            tools.append({
-                "name": t["function"]["name"],
-                "description": t["function"]["description"],
-                "input_schema": t["function"]["parameters"],
-            })
+        # Get tool definitions dynamically from MCP (not hardcoded)
+        tools = self.mcp_client.get_tools_for_llm(format="anthropic")
 
         messages = history.copy()
 
+        # Agent loop: LLM decides → call tool via MCP → feed result → repeat
         max_iterations = 10
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
+            logger.info(f"Agent loop iteration {iteration + 1}/{max_iterations}")
+
             response = await client.messages.create(
                 model="claude-sonnet-4-5-20250929",
                 max_tokens=4096,
@@ -363,11 +252,11 @@ class DoctorAppointmentAgent:
             tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
 
             if not tool_use_blocks:
-                # Extract text response
+                # Extract text response - LLM has produced its final answer
                 text_blocks = [b.text for b in response.content if b.type == "text"]
                 return "\n".join(text_blocks) or "Done.", actions
 
-            # Process tool calls
+            # Process tool calls through MCP protocol
             messages.append({"role": "assistant", "content": response.content})
 
             tool_results = []
@@ -375,10 +264,15 @@ class DoctorAppointmentAgent:
                 tool_name = block.name
                 tool_args = block.input
 
-                logger.info(f"Agent invoking MCP tool: {tool_name}({tool_args})")
+                logger.info(f"Agent routing tool call through MCP: {tool_name}({tool_args})")
                 actions.append(f"Called {tool_name}")
 
-                result = await self.tool_handlers.handle_tool_call(tool_name, tool_args)
+                # Route through MCP Client → MCP Server (protocol-driven)
+                try:
+                    result = await self.mcp_client.call_tool(tool_name, tool_args)
+                except Exception as e:
+                    logger.error(f"MCP tool call failed: {tool_name}: {e}")
+                    result = json.dumps({"error": f"Tool execution failed: {str(e)}"})
 
                 tool_results.append({
                     "type": "tool_result",
